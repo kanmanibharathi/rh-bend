@@ -1,0 +1,194 @@
+
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+import io
+from docx import Document
+from docx.shared import Inches
+from openpyxl import Workbook
+from scipy import stats
+
+class SpearmanCorrelationAnalyzer:
+    def __init__(self, df, vars):
+        self.df = df
+        self.vars = vars
+        self.results = {}
+        self.heatmap_buf = None
+        
+    def validate(self):
+        # 1. Check columns
+        missing = [v for v in self.vars if v not in self.df.columns]
+        if missing:
+            raise ValueError(f"Missing variables: {missing}")
+            
+        # 2. Check numeric and missing
+        self.data = self.df[self.vars].apply(pd.to_numeric, errors='coerce')
+        if self.data.isnull().any().any():
+            raise ValueError("Selected variables contain missing values. Please handle missing data first.")
+            
+        # 3. Check sample size
+        n = self.data.shape[0]
+        if n < 3:
+            raise ValueError("At least 3 observations are required for correlation analysis.")
+            
+        # 4. Check variance
+        if (self.data.var() == 0).any():
+             raise ValueError("One or more variables have zero variance (constant values).")
+
+        self.n = n
+        
+    def run_analysis(self):
+        # Compute Spearman Correlation Matrix (rho) and P-values
+        # scipy.stats.spearmanr returns (rho, p)
+        # If input is matrix, returns matrices
+        
+        rho_matrix, p_matrix = stats.spearmanr(self.data, axis=0) # axis=0 for rows=obs
+        
+        # If only 2 vars, spearmanr returns float, not array
+        if len(self.vars) == 2:
+            rho_matrix = np.array([[1.0, rho_matrix], [rho_matrix, 1.0]])
+            p_matrix = np.array([[0.0, p_matrix], [p_matrix, 0.0]]) # Diagonal p logic varies, assumes 0 or 1
+        
+        # Convert to DF for easier handling
+        rho_df = pd.DataFrame(rho_matrix, index=self.vars, columns=self.vars)
+        p_df = pd.DataFrame(p_matrix, index=self.vars, columns=self.vars)
+        sig_df = pd.DataFrame(index=self.vars, columns=self.vars)
+        
+        for r in self.vars:
+            for c in self.vars:
+                if r == c:
+                    p_df.loc[r, c] = 1.0 
+                    sig_df.loc[r, c] = ""
+                else:
+                    p = p_df.loc[r, c]
+                    # Sig code
+                    if p <= 0.01: sig = "**"
+                    elif p <= 0.05: sig = "*"
+                    else: sig = ""
+                    sig_df.loc[r, c] = sig
+                    
+        self.results = {
+            "corr_matrix": rho_df,
+            "p_matrix": p_df,
+            "sig_matrix": sig_df
+        }
+        
+    def generate_heatmap(self):
+        plt.figure(figsize=(10, 8))
+        corr = self.results['corr_matrix']
+        
+        # Heatmap with annotations
+        sns.heatmap(corr, annot=True, cmap='coolwarm', vmin=-1, vmax=1, center=0, fmt=".2f",
+                    linewidths=0.5, linecolor='gray', square=True)
+                    
+        plt.title('Spearman Rank Correlation Heatmap')
+        
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
+        buf.seek(0)
+        self.heatmap_buf = buf
+        plt.close()
+        return buf
+        
+    def create_report_doc(self):
+        doc = Document()
+        doc.add_heading('Spearman Rank Correlation Report', 0)
+        
+        doc.add_heading('1. Method', level=1)
+        doc.add_paragraph(f"Spearman's rank correlation coefficients (ρ) were computed for {len(self.vars)} variables using {self.n} observations. Variables were rank-transformed to measure monotonic associations. Significance was tested at p <= 0.05 (*) and p <= 0.01 (**).")
+        
+        # 2. Correlation Matrix Table
+        doc.add_heading('2. Spearman Correlation Matrix', level=1)
+        table = doc.add_table(rows=1, cols=len(self.vars) + 1)
+        hdr = table.rows[0].cells
+        hdr[0].text = "Variable"
+        for i, v in enumerate(self.vars):
+            hdr[i+1].text = v
+            
+        corr = self.results['corr_matrix']
+        sig = self.results['sig_matrix']
+        
+        for i, r_var in enumerate(self.vars):
+            row = table.add_row().cells
+            row[0].text = r_var
+            for j, c_var in enumerate(self.vars):
+                val = corr.loc[r_var, c_var]
+                s = sig.loc[r_var, c_var]
+                if i == j:
+                    txt = "1.00"
+                else:
+                    txt = f"{val:.2f} {s}".strip()
+                row[j+1].text = txt
+                
+        # 3. Heatmap
+        if self.heatmap_buf:
+            doc.add_heading('3. Heatmap', level=1)
+            self.heatmap_buf.seek(0)
+            doc.add_picture(self.heatmap_buf, width=Inches(6))
+            
+        # 4. Interpretation
+        doc.add_heading('4. Interpretation', level=1)
+        
+        pairs_reported = []
+        
+        for i in range(len(self.vars)):
+            for j in range(i+1, len(self.vars)):
+                v1 = self.vars[i]
+                v2 = self.vars[j]
+                r = corr.loc[v1, v2]
+                p = self.results['p_matrix'].loc[v1, v2]
+                
+                desc = ""
+                relation = "positive" if r > 0 else "negative"
+                strength = ""
+                significance = ""
+                
+                if abs(r) >= 0.7: strength = "strong"
+                elif abs(r) >= 0.4: strength = "moderate"
+                else: strength = "weak"
+                
+                if p <= 0.01: significance = "highly significant"
+                elif p <= 0.05: significance = "significant"
+                else: significance = "non-significant"
+                
+                if p <= 0.05 or abs(r) >= 0.4:
+                    sig_txt = "**" if p <= 0.01 else "*" if p <= 0.05 else ""
+                    doc.add_paragraph(f"{v1} exhibited a {strength} and {significance} {relation} monotonic association with {v2} (ρ = {r:.2f}{sig_txt}).")
+                    
+        f = io.BytesIO()
+        doc.save(f)
+        f.seek(0)
+        return f
+
+    def create_output_excel(self):
+        wb = Workbook()
+        
+        # 1. Correlation Matrix
+        ws1 = wb.active
+        ws1.title = "Spearman_Matrix_rho"
+        ws1.append(["Variable"] + self.vars)
+        
+        for r_var in self.vars:
+            row = [r_var] + [self.results['corr_matrix'].loc[r_var, c] for c in self.vars]
+            ws1.append(row)
+            
+        # 2. P-values
+        ws2 = wb.create_sheet("P_Values")
+        ws2.append(["Variable"] + self.vars)
+        for r_var in self.vars:
+            row = [r_var] + [self.results['p_matrix'].loc[r_var, c] for c in self.vars]
+            ws2.append(row)
+            
+        # 3. Significance Codes
+        ws3 = wb.create_sheet("Significance_Codes")
+        ws3.append(["Code", "Meaning", "P-value Range"])
+        ws3.append(["**", "Highly Significant", "<= 0.01"])
+        ws3.append(["*", "Significant", "<= 0.05"])
+        
+        f = io.BytesIO()
+        wb.save(f)
+        f.seek(0)
+        return f
