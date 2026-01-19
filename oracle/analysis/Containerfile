@@ -1,0 +1,36 @@
+# Use a lightweight Python base image
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    APP_HOME=/app
+
+# Set work directory
+WORKDIR $APP_HOME
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir gunicorn uvicorn
+
+# Copy project files
+COPY . .
+
+# Expose the port FastAPI will run on
+EXPOSE 8000
+
+# Command to run the application using Gunicorn with Uvicorn workers
+# Use PORT environment variable for cloud platforms (Render, Cloud Run, etc.)
+# -w 4: 4 worker processes (good for most cloud platforms)
+# -k uvicorn.workers.UvicornWorker: Use Uvicorn for ASGI support
+# --bind 0.0.0.0:$PORT: Listen on port specified by environment variable
+CMD gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:${PORT:-8000} --timeout 300
+
+
